@@ -88,13 +88,14 @@ class RBSolver(nn.Module):
             losses.append(loss)
         loss = torch.stack(losses).mean()
         all_frame_all_link_si = torch.stack(all_frame_all_link_si)
+        
+        # metrics
         output = {
             "rendered_masks": all_frame_all_link_si,
             "ref_masks": masks_ref,
             "error_maps": (all_frame_all_link_si - masks_ref.float()).abs(),
         }
-        # metrics
-        output = dict()
+
         if "gt_camera_pose" in data:
             gt_Tc_c2b = data["gt_camera_pose"]
             if not torch.allclose(gt_Tc_c2b, torch.eye(4).to(gt_Tc_c2b.device)):
