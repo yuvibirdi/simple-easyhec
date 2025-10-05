@@ -73,9 +73,8 @@ class RBSolver(nn.Module):
                     Tc_c2l = Tc_c2b @ mount_poses[bid] @ link_poses[bid, link_idx]
                 else:
                     Tc_c2l = Tc_c2b @ link_poses[bid, link_idx]
-                verts, faces = (
-                    getattr(self, f"vertices_{link_idx}"),
-                    getattr(self, f"faces_{link_idx}"),
+                verts, faces = getattr(self, f"vertices_{link_idx}"), getattr(
+                    self, f"faces_{link_idx}"
                 )
                 si = self.renderer.render_mask(verts, faces, intrinsic, Tc_c2l)
                 all_link_si.append(si)
@@ -89,6 +88,8 @@ class RBSolver(nn.Module):
             losses.append(loss)
         loss = torch.stack(losses).mean()
         all_frame_all_link_si = torch.stack(all_frame_all_link_si)
+        
+        # metrics
         output = {
             "rendered_masks": all_frame_all_link_si,
             "ref_masks": masks_ref,
