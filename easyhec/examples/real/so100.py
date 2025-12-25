@@ -5,9 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import json
 import numpy as np
 import torch
 import tyro
+from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera
 from lerobot.cameras.realsense.configuration_realsense import \
     RealSenseCameraConfig
@@ -52,6 +55,10 @@ class SO100Args(Args):
     """LeRobot robot ID. If provided will control that robot and will save results to {output_dir}/{robot_id}"""
     realsense_camera_serial_id: str = "146322070293"
     """Realsense camera serial ID."""
+    camera_intrinsics_path: Optional[str] = None
+    """Path to JSON file containing camera intrinsics from chessboard calibration. If None, will try to load from default location."""
+    opencv_camera_id: int = 0
+    """OpenCV camera device ID (usually 0 for first camera). Used when using OpenCV cameras instead of RealSense."""
 
 # CHECK: This is extrememly important to tune. Run this script with --help for an explanation.
 CALIBRATION_OFFSET = {
@@ -64,36 +71,41 @@ CALIBRATION_OFFSET = {
 }
 
 # For the author's SO100 they used this calibration offset. Yours might be different
-CALIBRATION_OFFSET = {
-    "shoulder_pan": -3,
-    "shoulder_lift": -3,
-    "elbow_flex": 5,
-    "wrist_flex": 5,
-    "wrist_roll": 0,
-    "gripper": 0,
-}
+# CALIBRATION_OFFSET = {
+#     "shoulder_pan": 196,
+#     "shoulder_lift": 676,
+#     "elbow_flex": -692,
+#     "wrist_flex": 616,
+#     "wrist_roll": -567,
+#     "gripper": -996,
+# }
 
 # CHECK: Check that the created robot config matches the one you wish to use and sets up the port, cameras etc. correctly.
-def create_real_robot(uid: str = "so100", robot_id: Optional[str] = None, realsense_serial_number: str = "146322070293") -> Robot:
+def create_real_robot(uid: str = "so100", robot_id: Optional[str] = None, realsense_serial_number: Optional[str] = None, opencv_camera_id: int = 0, use_opencv: bool = True) -> Robot:
     """Wrapper function to map string UIDS to real robot configurations. Primarily for saving a bit of code for users when they fork the repository. They can just edit the camera, id etc. settings in this one file."""
     if uid == "so100":
+        if use_opencv:
+            # for OpenCV camera users (webcam, USB cameras, etc.)
+            cameras={
+                "base_camera": OpenCVCameraConfig(index_or_path=opencv_camera_id, fps=30, width=640, height=480)
+            }
+        else:
+            # for intel realsense camera users you need to modify the serial number or name for your own hardware
+            if realsense_serial_number is None:
+                realsense_serial_number = "146322070293"
+            cameras={
+                "base_camera": RealSenseCameraConfig(serial_number_or_name=realsense_serial_number, fps=30, width=1280, height=720)
+            }
         robot_config = SO100FollowerConfig(
             port="/dev/ttyACM0",
             use_degrees=True,
-            # for phone camera users you can use the commented out setting below
-            # cameras={
-            #     "base_camera": OpenCVCameraConfig(camera_index=1, fps=30, width=640, height=480)
-            # }
-            # for intel realsense camera users you need to modify the serial number or name for your own hardware
-            cameras={
-                "base_camera": RealSenseCameraConfig(serial_number_or_name=realsense_serial_number, fps=30, width=1280, height=720)
-            },
+            cameras=cameras,
             id=robot_id,
         )
         real_robot = make_robot_from_config(robot_config)
         return real_robot
 
-
+        
 def main(args: SO100Args):
     user_tuned_calibration_offset = False
     for k in CALIBRATION_OFFSET.keys():
@@ -104,7 +116,15 @@ def main(args: SO100Args):
         logging.warning("The calibration offset for sim2real/real2sim is not tuned!! Unless you are absolutely sure you will most likely get poor results.")
 
     robot_id = "default" if args.robot_id is None else args.robot_id
-    robot: SO100Follower = create_real_robot("so100", robot_id=args.robot_id, realsense_serial_number=args.realsense_camera_serial_id)
+    # Determine if we should use OpenCV camera (if intrinsics path is provided or explicitly using OpenCV)
+    use_opencv = args.camera_intrinsics_path is not None
+    robot: SO100Follower = create_real_robot(
+        "so100", 
+        robot_id=args.robot_id, 
+        realsense_serial_number=args.realsense_camera_serial_id if not use_opencv else None,
+        opencv_camera_id=args.opencv_camera_id,
+        use_opencv=use_opencv
+    )
     robot.bus.motors["gripper"].norm_mode = MotorNormMode.DEGREES
     robot.connect()
 
@@ -119,10 +139,12 @@ def main(args: SO100Args):
     for k in cameras_ft.keys():
         initial_extrinsic_guess = np.eye(4)
 
-        # the guess says we are at position xyz=[-0.4, 0.0, 0.4] and angle the camerea downwards by np.pi / 4 radians  or 45 degrees
+        # Camera position: 7cm forward, 10cm left, 45cm up
+        # Camera orientation: looking forward-downward and to the right
+        # euler2mat(roll, pitch, yaw): pitch down ~20deg, yaw right ~30deg
         # note that this convention is more natural for robotics (follows the typical convention for ROS and various simulators), where +Z is moving up towards the sky, +Y is to the left, +X is forward
-        initial_extrinsic_guess[:3, :3] = euler2mat(0, np.pi / 4, -np.pi / 5)
-        initial_extrinsic_guess[:3, 3] = np.array([-0.4, 0.1, 0.5])
+        initial_extrinsic_guess[:3, :3] = euler2mat(0, 0.35, -0.5)  # pitch down ~20deg, yaw right ~29deg
+        initial_extrinsic_guess[:3, 3] = np.array([0.07, 0.10, 0.45])
         initial_extrinsic_guess = ros2opencv(initial_extrinsic_guess)
 
         initial_extrinsic_guesses[k] = initial_extrinsic_guess
@@ -132,10 +154,37 @@ def main(args: SO100Args):
         print(f"Camera {k}:\n{repr(initial_extrinsic_guesses[k])}")
 
 
-    # get camera intrinsics for realsense cameras.
+    # get camera intrinsics - either from JSON file (OpenCV cameras) or from RealSense cameras
     intrinsics = dict()
     for cam_name, cam in robot.cameras.items():
-        if isinstance(cam, RealSenseCamera):
+        if args.camera_intrinsics_path is not None:
+            # Load intrinsics from JSON file (for OpenCV cameras)
+            intrinsics_path = Path(args.camera_intrinsics_path)
+            if not intrinsics_path.exists():
+                # Try default location
+                default_path = Path(args.output_dir) / robot_id / cam_name / "camera_intrinsic.json"
+                if default_path.exists():
+                    intrinsics_path = default_path
+                else:
+                    raise FileNotFoundError(
+                        f"Camera intrinsics file not found at {args.camera_intrinsics_path} or default location {default_path}"
+                    )
+            
+            with open(intrinsics_path, "r") as f:
+                intrinsics_data = json.load(f)
+            
+            intrinsic = np.array(
+                [
+                    [intrinsics_data["fx"], 0, intrinsics_data["cx"]],
+                    [0, intrinsics_data["fy"], intrinsics_data["cy"]],
+                    [0, 0, 1],
+                ],
+                dtype=np.float32,
+            )
+            intrinsics[cam_name] = intrinsic
+            print(f"Loaded intrinsics for {cam_name} from {intrinsics_path}")
+        elif isinstance(cam, RealSenseCamera):
+            # Extract intrinsics from RealSense camera
             streams = cam.rs_profile.get_streams()
             assert len(streams) == 1, "Only one stream per camera is supported at the moment and it must be the color steam. Make sure to not enable any other streams."
             color_stream = streams[0]
@@ -148,6 +197,11 @@ def main(args: SO100Args):
                 ]
             )
             intrinsics[cam_name] = intrinsic
+        else:
+            raise ValueError(
+                f"Camera {cam_name} is not a RealSense camera and no intrinsics path provided. "
+                "Please provide --camera-intrinsics-path for OpenCV cameras."
+            )
 
 
 
@@ -190,14 +244,26 @@ def main(args: SO100Args):
         link_poses_dataset = np.load(Path(args.output_dir) / robot_id / "link_poses_dataset.npy")
         image_dataset = np.load(Path(args.output_dir) / robot_id / "image_dataset.npy", allow_pickle=True).reshape(-1)[0]
     else:
-        # reference qpos positions to calibrate with    
+        # reference qpos positions to calibrate with
+        # More diverse poses = better calibration accuracy
+        # Format: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
         qpos_samples = [
-            np.array([
-                0, 0, 0, np.pi / 2, np.pi / 2, 0.2
-            ]),
-            np.array([
-                np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0
-            ])
+            # Pose 1: Neutral upright
+            np.array([0, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
+            # Pose 2: Rotated left, slightly lifted
+            np.array([np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0]),
+            # Pose 3: Rotated right
+            np.array([-np.pi / 3, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
+            # Pose 4: Arm extended forward and down
+            np.array([0, np.pi / 4, -np.pi / 4, np.pi / 3, np.pi / 2, 0]),
+            # Pose 5: Arm tucked, rotated left
+            np.array([np.pi / 4, -np.pi / 4, np.pi / 4, np.pi / 2, 0, 0.2]),
+            # Pose 6: Arm extended right side
+            np.array([-np.pi / 4, np.pi / 6, -np.pi / 6, np.pi / 2, np.pi, 0]),
+            # Pose 7: Different wrist angle
+            np.array([np.pi / 6, 0, 0, np.pi / 4, np.pi / 2, 0.2]),
+            # Pose 8: Arm stretched out
+            np.array([0, np.pi / 3, -np.pi / 3, np.pi / 4, np.pi / 2, 0]),
         ]
         control_freq = 15
         max_radians_per_step = 0.05
