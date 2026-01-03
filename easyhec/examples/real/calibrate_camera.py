@@ -33,10 +33,10 @@ class CalibrationArgs:
     output: str = "camera_intrinsic.json"
     """Output path for the calibrated intrinsics JSON file"""
     
-    width: int = 640
+    width: int = 1280 
     """Camera width"""
     
-    height: int = 480
+    height: int = 720 
     """Camera height"""
     
     chessboard_cols: int = 9

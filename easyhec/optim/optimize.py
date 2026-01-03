@@ -79,7 +79,16 @@ def optimize(
             batch = dataset
         else:
             bid = torch.randperm(len(dataset["mask"]))[:batch_size]
-            batch = {k: v[bid] for k, v in dataset.items()}
+            # Only batch-index the keys that are actually batched (N, ...)
+            # intrinsic and gt_camera_pose are single matrices, mount_poses can be None
+            batch = {}
+            for k, v in dataset.items():
+                if v is None:
+                    batch[k] = None
+                elif k in ("intrinsic", "gt_camera_pose"):
+                    batch[k] = v  # not batched, keep as-is
+                else:
+                    batch[k] = v[bid]
         output = solver(batch)
         optimizer.zero_grad()
         output["mask_loss"].backward()

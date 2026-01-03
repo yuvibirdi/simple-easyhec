@@ -87,7 +87,7 @@ def create_real_robot(uid: str = "so100", robot_id: Optional[str] = None, realse
         if use_opencv:
             # for OpenCV camera users (webcam, USB cameras, etc.)
             cameras={
-                "base_camera": OpenCVCameraConfig(index_or_path=opencv_camera_id, fps=30, width=640, height=480)
+                "base_camera": OpenCVCameraConfig(index_or_path=opencv_camera_id, fps=30, width=1280, height=720)
             }
         else:
             # for intel realsense camera users you need to modify the serial number or name for your own hardware
@@ -250,18 +250,18 @@ def main(args: SO100Args):
         qpos_samples = [
             # Pose 1: Neutral upright
             np.array([0, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
-            # Pose 2: Rotated left, slightly lifted
-            np.array([np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0]),
-            # Pose 3: Rotated right
+            # Pose 2: Rotated right, slightly lifted
+            np.array([-np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0]),
+            # Pose 3: Rotated right (more)
             np.array([-np.pi / 3, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
             # Pose 4: Arm extended forward and down
             np.array([0, np.pi / 4, -np.pi / 4, np.pi / 3, np.pi / 2, 0]),
-            # Pose 5: Arm tucked, rotated left
-            np.array([np.pi / 4, -np.pi / 4, np.pi / 4, np.pi / 2, 0, 0.2]),
+            # Pose 5: Arm tucked, rotated right
+            np.array([-np.pi / 4, -np.pi / 4, np.pi / 4, np.pi / 2, 0, 0.2]),
             # Pose 6: Arm extended right side
             np.array([-np.pi / 4, np.pi / 6, -np.pi / 6, np.pi / 2, np.pi, 0]),
-            # Pose 7: Different wrist angle
-            np.array([np.pi / 6, 0, 0, np.pi / 4, np.pi / 2, 0.2]),
+            # Pose 7: Different wrist angle, slight right rotation
+            np.array([-np.pi / 6, 0, 0, np.pi / 4, np.pi / 2, 0.2]),
             # Pose 8: Arm stretched out
             np.array([0, np.pi / 3, -np.pi / 3, np.pi / 4, np.pi / 2, 0]),
         ]
@@ -333,6 +333,7 @@ def main(args: SO100Args):
             np.save(mask_path, masks)
 
         ### run the optimization given the data ###
+        torch.cuda.empty_cache()  # clear any lingering allocations
         predicted_camera_extrinsic_opencv = (
             optimize(
                 camera_intrinsic=torch.from_numpy(intrinsic).float().to(device),
@@ -352,6 +353,7 @@ def main(args: SO100Args):
                 gt_camera_pose=None,
                 iterations=args.train_steps,
                 early_stopping_steps=args.early_stopping_steps,
+                batch_size=4,  # process 4 frames at a time to reduce VRAM usage
             )
             .cpu()
             .numpy()
