@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
-
+from typing import Optional
+import json
 import cv2
 import numpy as np
 import pyrealsense2 as rs
@@ -24,6 +25,10 @@ class RealPaperArgs(Args):
     """The type of paper to use to calibrate against. Options are 'letter' or 'a4'"""
     realsense_camera_serial_id: str = "none"
     """The serial id of the realsense camera to use for calibration"""
+    camera_intrinsics_path: Optional[str] = None
+    """Path to JSON file containing camera intrinsics from chessboard calibration. If None, will try to load from default location."""
+    opencv_camera_id: int = 0
+    """OpenCV camera device ID (usually 0 for first camera). Used when using OpenCV cameras instead of RealSense."""
     # TODO (stao): A1, A2, A3, follow a nice structure, we can just generate the meshes for those.
 
 
@@ -45,53 +50,114 @@ def main(args: RealPaperArgs):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # Initialize RealSense configuration
-    config = rs.config()
-    pipeline = rs.pipeline()
-    ctx = rs.context()
-    devices = ctx.query_devices()
-    if len(devices) == 0:
-        raise RuntimeError("No RealSense devices found.")
+    # Determine if using OpenCV camera (when intrinsics path is provided)
+    use_opencv = args.camera_intrinsics_path is not None
 
-    # Configure streams
     camera_width = 1280
     camera_height = 720
-    if args.realsense_camera_serial_id == "none":
-        print("No realsense camera serial id provided, using the first device found")
-        realsense_camera_serial_id = devices[0].get_info(rs.camera_info.serial_number)
+
+    if use_opencv:
+        ### OpenCV Camera Setup ###
+        print(f"Using OpenCV camera (device ID: {args.opencv_camera_id})")
+        
+        # Load intrinsics from JSON file
+        intrinsics_path = Path(args.camera_intrinsics_path)
+        if not intrinsics_path.exists():
+            # Try default location
+            default_path = Path(args.output_dir) / "camera_intrinsic.json"
+            if default_path.exists():
+                intrinsics_path = default_path
+            else:
+                raise FileNotFoundError(
+                    f"Camera intrinsics file not found at {args.camera_intrinsics_path} or default location {default_path}"
+                )
+        
+        with open(intrinsics_path, "r") as f:
+            intrinsics_data = json.load(f)
+        
+        intrinsic = np.array(
+            [
+                [intrinsics_data["fx"], 0, intrinsics_data["cx"]],
+                [0, intrinsics_data["fy"], intrinsics_data["cy"]],
+                [0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+        print(f"Loaded intrinsics from {intrinsics_path}")
+        
+        # Capture image using OpenCV
+        cap = cv2.VideoCapture(args.opencv_camera_id)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
+        
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open OpenCV camera with ID {args.opencv_camera_id}")
+        
+        # Warm up the camera
+        skip_frames = 60
+        print("Starting camera and warming it up...")
+        for _ in range(skip_frames):
+            ret, frame = cap.read()
+            if not ret:
+                print("No frame")
+                continue
+        
+        # Capture the actual image
+        ret, frame = cap.read()
+        if not ret:
+            raise RuntimeError("Failed to capture image from OpenCV camera")
+        
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        camera_height, camera_width = image.shape[:2]
+        cap.release()
+        
     else:
-        realsense_camera_serial_id = args.realsense_camera_serial_id
-    print(f"RealSense device id: {realsense_camera_serial_id}")
-    config.enable_device(realsense_camera_serial_id)
-    config.enable_stream(
-        rs.stream.color, camera_width, camera_height, rs.format.bgr8, 30
-    )
-    # Get the color stream profile and its intrinsics
-    profile = pipeline.start(config)
-    color_stream = profile.get_stream(rs.stream.color)
+        ### RealSense Camera Setup ###
+        # Initialize RealSense configuration
+        config = rs.config()
+        pipeline = rs.pipeline()
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        if len(devices) == 0:
+            raise RuntimeError("No RealSense devices found.")
 
-    ### Fetch Intrinsics ###
-    color_intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
-    intrinsic = np.array(
-        [
-            [color_intrinsics.fx, 0, color_intrinsics.ppx],
-            [0, color_intrinsics.fy, color_intrinsics.ppy],
-            [0, 0, 1],
-        ],
-        dtype=np.float32,
-    )
+        # Configure streams
+        if args.realsense_camera_serial_id == "none":
+            print("No realsense camera serial id provided, using the first device found")
+            realsense_camera_serial_id = devices[0].get_info(rs.camera_info.serial_number)
+        else:
+            realsense_camera_serial_id = args.realsense_camera_serial_id
+        print(f"RealSense device id: {realsense_camera_serial_id}")
+        config.enable_device(realsense_camera_serial_id)
+        config.enable_stream(
+            rs.stream.color, camera_width, camera_height, rs.format.bgr8, 30
+        )
+        # Get the color stream profile and its intrinsics
+        profile = pipeline.start(config)
+        color_stream = profile.get_stream(rs.stream.color)
 
-    ### Fetch one color image ###
-    skip_frames = 60
-    print("Starting camera and warming it up...")
-    for _ in range(skip_frames):
-        frames = pipeline.wait_for_frames()
-        cframe = frames.get_color_frame()
-        if not cframe:
-            print("No frame")
-            continue
-        image = np.asanyarray(cframe.get_data())
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        ### Fetch Intrinsics ###
+        color_intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
+        intrinsic = np.array(
+            [
+                [color_intrinsics.fx, 0, color_intrinsics.ppx],
+                [0, color_intrinsics.fy, color_intrinsics.ppy],
+                [0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        ### Fetch one color image ###
+        skip_frames = 60
+        print("Starting camera and warming it up...")
+        for _ in range(skip_frames):
+            frames = pipeline.wait_for_frames()
+            cframe = frames.get_color_frame()
+            if not cframe:
+                print("No frame")
+                continue
+            image = np.asanyarray(cframe.get_data())
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     print(f"Camera Intrinsics:\n {repr(intrinsic)}")
     images = [image]

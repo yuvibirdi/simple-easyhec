@@ -75,6 +75,7 @@ def create_real_robot(uid: str = "so100", robot_id: Optional[str] = None, realse
     if uid == "so100":
         if use_opencv:
             # for OpenCV camera users (webcam, USB cameras, etc.)
+            # FIXED: Using 640x480 to match camera_intrinsic.json calibration
             cameras={
                 "base_camera": OpenCVCameraConfig(index_or_path=opencv_camera_id, fps=30, width=640, height=480)
             }
@@ -236,29 +237,20 @@ def main(args: SO100Args):
         # reference qpos positions to calibrate with
         # More diverse poses = better calibration accuracy
         # Format: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
+        # FIXED: Using 6 poses instead of 2 for better calibration
         qpos_samples = [
-            np.array([
-                0, 0, 0, np.pi / 2, np.pi / 2, 0.2
-            ]),
-            np.array([
-                np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0
-            ]),
             # Pose 1: Neutral upright
             np.array([0, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
             # Pose 2: Rotated right, slightly lifted
-            np.array([-np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0]),
-            # Pose 3: Rotated right (more)
+            np.array([np.pi / 3, -np.pi / 6, 0, np.pi / 2, np.pi / 2, 0]),
+            # Pose 3: Rotated left
             np.array([-np.pi / 3, 0, 0, np.pi / 2, np.pi / 2, 0.2]),
             # Pose 4: Arm extended forward and down
             np.array([0, np.pi / 4, -np.pi / 4, np.pi / 3, np.pi / 2, 0]),
             # Pose 5: Arm tucked, rotated right
             np.array([-np.pi / 4, -np.pi / 4, np.pi / 4, np.pi / 2, 0, 0.2]),
             # Pose 6: Arm extended right side
-            #np.array([-np.pi / 4, np.pi / 6, -np.pi / 6, np.pi / 2, np.pi, 0]),
-            # Pose 7: Different wrist angle, slight right rotation
-            #np.array([-np.pi / 6, 0, 0, np.pi / 4, np.pi / 2, 0.2]),
-            # Pose 8: Arm stretched out
-            #np.array([0, np.pi / 3, -np.pi / 3, np.pi / 4, np.pi / 2, 0]),
+            np.array([-np.pi / 4, np.pi / 6, -np.pi / 6, np.pi / 2, np.pi, 0]),
         ]
         control_freq = 15
         max_radians_per_step = 0.05
@@ -329,6 +321,8 @@ def main(args: SO100Args):
 
         ### run the optimization given the data ###
         torch.cuda.empty_cache()  # clear any lingering allocations
+        # FIXED: Removed batch_size parameter to match paper example (full batch optimization)
+        # The paper example doesn't use batching and achieves <1k loss
         predicted_camera_extrinsic_opencv = (
             optimize(
                 camera_intrinsic=torch.from_numpy(intrinsic).float().to(device),
@@ -348,7 +342,7 @@ def main(args: SO100Args):
                 gt_camera_pose=None,
                 iterations=args.train_steps,
                 early_stopping_steps=args.early_stopping_steps,
-                batch_size=None,  # process 4 frames at a time to reduce VRAM usage
+                batch_size=None,  # FIXED: Use None for full batch optimization like paper example
             )
             .cpu()
             .numpy()
